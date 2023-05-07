@@ -38,6 +38,7 @@ if __name__ == "__main__":
 ```
 
 ## Next Steps
+- Allow for multiple Quizes to exist at one time, able to visit "my quizes"
 - Polish UI
 - Allow for downloading into local file from site
 - Implement a RabbitMQ features 
