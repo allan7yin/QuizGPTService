@@ -9,28 +9,8 @@
     <h1 style="text-align: center"> QuizGPT </h1>
     {% if qa_pairs|length < 1 %}
     <h4 style="text-align: center"> 
-        Nothing created yet. Create a quiz below! Enter a prompt of the form 'topic, number of question, difficuly'
+        Nothing created yet. Create a quiz below! Enter a prompt of the form (topic, number of question, difficuly)
     </h4>
-    {% else %}
-    <table>
-        <tr>
-            <th>Number</th>
-            <th>Question</th>
-            <th>Answer</th>
-        </tr>
-        {% for task in tasks %}
-            <tr>
-                <td>{{ task.content }}</td>
-                <td>{{ task.date_created.date() }}</td>
-                <td>
-                    <a href="/delete/{{task.id}}">Delete</a>
-                    <br>
-                    <a href="/update/{{task.id}}">Update</a>
-                </td>
-            </tr>
-        {% endfor %}
-    </table>
-    {% endif %}
 
     <div class="form">
         <form action="/" method="POST">
@@ -38,5 +18,30 @@
             <input type="submit" value="Add Task">
         </form>
     </div>
+
+    {% else %}
+    <table>
+        <tr>
+            <th>Number</th>
+            <th>Question</th>
+            <th>Answer</th>
+            <th>Actions</th>
+        </tr>
+        {% for qa_pair in qa_pairs %}
+            <tr>
+                <td>{{ qa_pair.id }}</td>
+                <td>{{ qa_pair.question }}</td>
+                <td>{{ qa_pair.answer }}</td>
+                <td>
+                    <a href="/delete/{{qa_pair.id}}">Delete</a>
+                    <br>
+                    <a href="/update/{{qa_pair.id}}">Update</a>
+                </td>
+            </tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+
+
 </div>
 {% endblock %}
