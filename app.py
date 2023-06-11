@@ -1,85 +1,168 @@
+import json
 import os
+import threading
 
 from flask import Flask, render_template, url_for, request, redirect
-from flask_sqlalchemy import SQLAlchemy
-from utils import generate_prompt
+import pika
+from utils import generate_prompt, MOCK_PROMPT
 import openai
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///test.db'
-db = SQLAlchemy(app)
+env = os.environ["ENVIRONMENT"]
 
-openai.api_key = openai.api_key = os.getenv("OPENAI_API_KEY")
+# RabbitMQ singleton channel
+global global_rabbitmq_channel
+global_rabbitmq_channel = None
 
-def create_database():
-    with app.app_context():
-        db.create_all()
-    print("SQLite database created.")
+# some configuration data we will keep here 
+rabbitmq_user = os.environ["RABBITMQ_USER"]
+rabbitmq_password = os.environ["RABBITMQ_PASSWORD"]
+rabbitmq_host = os.environ["RABBITMQ_HOST"]
+rabbitmq_port = int(os.environ["RABBITMQ_PORT"])
 
-class Prompt(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    question = db.Column(db.String(200), nullable=False)
-    answer = db.Column(db.String(200), nullable=False)
+request_queue = os.environ.get("REQUEST_QUEUE")
+response_queue = os.environ.get("RESPOSNE_QUEUE")
 
-    def __repr__(self):
-        return '<Question Answer Pair %r>' % self.id
-    
-@app.route('/', methods=['POST', 'GET'])
-def index():
-    # Data Structures and Algorithms, 10, Medium 
-    if request.method == 'POST':
-        parameters = request.form['content']
-        result = parameters.split(",")
+gpt_exchnage = os.getenv("GPT_EXCHANGE")
+
+gpt_routing_key = os.getenv("GPT_TO_GATEWAY_ROUTING_KEY")
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+class QuestionDto:
+    def __init__(self):
+        self.questionId = None
+        self.text = None
+        self.options = []
+        self.answers = []
+
+class OptionDto:
+    def __init__(self):
+        self.optionId = None
+        self.text = None
+
+class AnswerDto:
+    def __init__(self):
+        self.answerId = None
+        self.text = None
+
+
+def parse_response(text, numOptions): # need numOptions to know how many to parse into
+    questions = text.split("\n\n")
+    quiz = []
+
+# ['', 'Question 1: What is the result of 75 + 16?', 'A: 91', 'B: 81', 'C: 89', 'D: 71', 'Answer: A'], the first one has extra space in it, remeber 
+    for question in questions:
+        # for each question, parse and place into an object
+        parsed_response = question.split("\n")
+
+        entry = QuestionDto()
+        if parsed_response[0] == '':
+            parsed_response = parsed_response[1:]
         
-        print(parameters)
+        for index in range(len(parsed_response)):
+            if index == 0:
+                # question
+                entry.text = parsed_response[index]
+            elif index == len(parsed_response) - 1:
+                # last one, this is the answer 
+                entry.answers = [parsed_response[index]]
+            else:
+                # this means we are on an option 
+                entry.options.append(parsed_response[index])
+            
+        quiz.append(entry)
 
+    return quiz
+    
+@app.route('/')
+def chatgpt_request(): #topic, numQuestions, numOptions, difficulty):
+    if env == "dev":
         response = openai.Completion.create( 
         model="text-davinci-003",
-        prompt=generate_prompt(result),
+        # prompt=generate_prompt(topic, numQuestions, numOptions, difficulty),
+        prompt=MOCK_PROMPT,
         temperature=0.8,
-        max_tokens=200
+        max_tokens=1000
         )
-        
-        print(response)
-        other=response.choices[0].text
-        # other = other[1:] # will need to throw out the first of the response, as it is the "sure, allan! part"
-        print(other)
 
-        # this now returns the response from the model, which will be x nummber of question and answer pairs 
-        # separated by the break string defined. Parse this response again, and save to the database 
+    print(response)
+    return response
 
-        # will provide option for users to delete / change questions or answers 
-        qa_pairs = other.split('\n\n')
-        print(qa_pairs)
-        qa_pairs = qa_pairs[1:]
-        for qa_pair in qa_pairs:
-            # for each qa_pair, split by => and, initiaize the db model 
-            qa_pair = qa_pair.split('\n')
-            #print(qa_pair)
-
-            newPrompt = Prompt(question=qa_pair[0], answer=qa_pair[1]) 
-            try:
-                db.session.add(newPrompt)
-                db.session.commit()
-            except:
-                return 'There was an issue adding your question and answers'
-        return redirect('/')
-    else:
-        qa_pairs = Prompt.query.order_by(Prompt.id).all()
-        return render_template(url_for('index.html', qa_pairs=qa_pairs))
-
-@app.route('/delete/<int:id>')
-def delete(id):
-    item_to_delete = Prompt.query.get_or_404(id)
-
+def callback(ch, method, properties, body): # called when message from queue has been consumed 
     try:
-        db.session.delete(item_to_delete)
-        db.session.commit()
-        return redirect('/')
-    except:
-        return 'There was a problem deleting that task'
+        message = json.loads(body) # get python object from the json 
+        # this JSON will be in the format of CreateQuizRequestDto.java -> id, topic, num questions, number of options, difficulty. 
+        print(message)
+        quiz_id = message["id"]
+        topic = message["topic"]
+        numQuestions = message["numberOfQuestions"]
+        numOptions = message["numberOfOptionsPerQuestion"]
+        difficulty = message["difficulty"]
+
+        generated_text = chatgpt_request(topic, numQuestions, numOptions, difficulty)
+        if generated_text is None:
+            print("Error generating text.")
+            return
+        text = generated_text["choices"][0]["text"]
+        formatted_quiz_dto = parse_response(text, numOptions)
+
+        # quizDto is what is being returned 
+        quizDto = {
+            "id": quiz_id,
+            "questions": formatted_quiz_dto
+        }
+
+        json_data = json.dumps(quizDto)
+        print("Reponse Message: " + json_data)
+
+        ch.basic_publish(exchange=gpt_exchnage, routing_key=gpt_routing_key, body=json_data)
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+
+    except Exception as exception:
+        print(exception)
+
+def connect_to_rabbitmq_server():
+    global global_rabbitmq_channel
+
+    credentials = pika.PlainCredentials(rabbitmq_user, rabbitmq_password)
+    connection = pika.BlockingConnection(pika.ConnectionParameters(host=rabbitmq_host, port=rabbitmq_port, virtual_host=rabbitmq_user, credentials=credentials))
+    print(f"Successfully connected to RabbitMQ at {rabbitmq_host}") if connection.is_open else print(f"Failed to connect to RabbitMQ at {rabbitmq_host}")
+
+    # create a channel 
+    global_rabbitmq_channel = connection.channel()
+    # declare the queues (which have also been declared on the other end)
+    global_rabbitmq_channel.queue_declare(queue=request_queue)
+    global_rabbitmq_channel.queue_declare(queue=response_queue)    
+    
+def start_consuming():
+    try:
+        # establish connection to RabbitMQ channel, 
+        global global_rabbitmq_channel
+        connect_to_rabbitmq_server()
+        if global_rabbitmq_channel is None:
+            print("Error connecting to input queue. Exiting...")
+            return "Error: Failed to connect to RabbitMQ"
+        else:
+            print("Successfully connected to RabbitMQ")
+        
+        global_rabbitmq_channel.basic_qos(prefetch_count=1) # indicates that the channel will only prefetch and process one message at a time before waiting for an acknowledgment.
+        global_rabbitmq_channel.basic_consume(queue=request_queue, on_message_callback=callback) # callback function called when message is consumed 
+        global_rabbitmq_channel.start_consuming()
+    except Exception as exception:
+        print(exception)
+
+
+# complete this one time, first time app is started
+@app.before_first_request
+def startup():
+    print('Starting RabbitMQ thread')
+    rabbitmq_thread = threading.Thread(target=start_consuming)
+    rabbitmq_thread.start()
+
 
 if __name__ == "__main__":
-    # with app.app_context():
-    #     create_database()
-    app.run(debug=True)
+    print('Starting Flask app. Environment: ', env)
+    if env == "dev":
+        print("In dev environment.")
+        app.run(host="0.0.0.0", port=5000)
