@@ -15,7 +15,7 @@ def generate_prompt(topic, numQuestions, numOptions, difficulty):
 
             Let the formatting be "Question: ..." then a new line, and then with the possible options beginning with the letter A: "A: ..." then a new line, the "B: ...", etc. 
             At the end, have the answer as "Answer: ..." for each of the questions. 
-            Each block of question, options, and answer is separated with 2 new lines.
+            After each group of question, options, and answer, print 2 new lines to separate from the next group. Do not place 2 spaces after the options and before the answer. 
             '''
 
               
